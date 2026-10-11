@@ -12,6 +12,16 @@ A Windows companion for downloading Witcher 3 mods from Nexus and updating them 
 
 The original W3MM and the companion's embedded manager share the same inventory lock. Close the original manager before opening the embedded one. Reading the Installed tab does not acquire that lock or change W3MM files.
 
+Keep the W3MM window opened by the bridge running while downloading more mods; subsequent installs reuse it. The original standalone executable is a separate process, so it cannot own the inventory at the same time.
+
+## Updating without duplicate entries
+
+After a complete installation passes payload verification, the bridge retires a previous main-package entry when it belongs to the same Nexus page, owns exactly the same mod/DLC folders, and has no extra components. The new entry keeps ownership of the installed files. Archived versions require starting from **Installed mods → Review files / update** so the intended previous entry is explicit. Optional files, disabled alternatives, unrelated pages, and partly overlapping bundles are kept for review.
+
+Cleanup changes the inventory only; it never calls Uninstall. A copy of `installed.xml` is saved in `backups/before-update-cleanup-*` first. Canceled, skipped, failed, incomplete, or unverified updates do not retire the old entry. W3MM replaces a selected mod folder as a whole, so obsolete files inside that folder are removed by the normal overwrite operation.
+
+Do not uninstall an older duplicate to tidy the list: it may own the same files as the new entry. The bridge's bundled W3MM now refuses an uninstall when another entry shares those files. This protection does not modify the original standalone W3MM executable. The Installed tab shows **Files missing — reinstall** when a recorded mod/DLC folder is absent; reinstall its intended archive to restore it.
+
 ## Recover tracking for mods you already installed
 
 W3MM's inventory does not store Nexus mod IDs, file IDs, or structured versions. **Match existing archives** inspects identifiable Nexus archives in Vortex's Witcher 3 downloads, your Downloads folder, and W3MM's last-used folder. It checks the archive's published Nexus SHA-256 and compares its mod/DLC payload to installed files. This matching is read-only.
@@ -67,6 +77,6 @@ The build is written to `dist/NexusW3MMBridge`. `build.ps1 -Python <path> -Outpu
 
 ## Credits and licenses
 
-Bridge code: [MIT](LICENSE.txt). Bundled W3MM: [BSD-2-Clause](W3MM-LICENSE.txt), based on [Systemcluster/The-Witcher-3-Mod-manager](https://github.com/Systemcluster/The-Witcher-3-Mod-manager), version 0.10.5, commit `010334e134fb6cc172a28ba76e7cf5c14117c20d`. The bridge adds a return value to `CustomMainWidget.installModFiles` so it can inspect installation results, and excludes FOMOD metadata from the game-menu scanner. Other upstream files are retained.
+Bridge code: [MIT](LICENSE.txt). Bundled W3MM: [BSD-2-Clause](W3MM-LICENSE.txt), based on [Systemcluster/The-Witcher-3-Mod-manager](https://github.com/Systemcluster/The-Witcher-3-Mod-manager), version 0.10.5, commit `010334e134fb6cc172a28ba76e7cf5c14117c20d`. Integration changes expose installation/save results, exclude FOMOD metadata from the game-menu scanner, keep skipped payloads from claiming a complete new version, and protect files shared by multiple inventory records during uninstall.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled tools and runtime licenses. This is an independent companion, unaffiliated with Nexus Mods or CD PROJEKT RED.

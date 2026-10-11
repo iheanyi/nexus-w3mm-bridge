@@ -55,6 +55,21 @@ def from_model(model):
             (('data', m.files), ('dlc', m.dlcs), ('menu', m.menus), ('ini', m.inis)) for name in names)) for m in model.all()]
 
 
+def missing_payloads(entry, game):
+    """A saved inventory row cannot prove that its mod folders still exist."""
+    if not game:
+        return []
+    missing = []
+    for tag, name in entry.components:
+        if tag not in ('data', 'dlc'):
+            continue
+        root = game / ('Mods' if tag == 'data' else 'DLC')
+        folder = root / name
+        if not folder.is_dir() and not (tag == 'data' and not entry.enabled and (root / ('~' + name)).is_dir()):
+            missing.append(name)
+    return missing
+
+
 def library_path(root: Path, config_dir: Path):
     scope = hashlib.sha256(str(config_dir.resolve()).casefold().encode()).hexdigest()[:16]
     return root / f'library-{scope}.json'
@@ -81,6 +96,34 @@ def binding_for(entry, mod_id, file, *, evidence='Selected by user'):
                 version=file.get('version', ''), category_id=file.get('category_id'),
                 uploaded_timestamp=int(file.get('uploaded_timestamp') or 0),
                 inventory_date=entry.date, evidence=evidence)
+
+
+def replaced_entries(previous, installed, bindings, mod_id, file, reviewed_key=None):
+    """Retire only fully superseded main packages on the same Nexus page.
+
+    Optional files, disabled alternatives and records owning extra components
+    need separate review. A shared page or similar display name is not enough.
+    """
+    if file.get('category_id') not in (1, 2):
+        return []
+    components = {(tag, name.casefold()) for tag, name in installed.components}
+    roots = {c for c in components if c[0] in ('data', 'dlc')}
+    if not roots or not installed.enabled:
+        return []
+    result = []
+    for old in previous:
+        binding = bindings.get(old.key, {})
+        old_components = {(tag, name.casefold()) for tag, name in old.components}
+        old_roots = {c for c in old_components if c[0] in ('data', 'dlc')}
+        category = binding.get('category_id')
+        known_main = category in (1, 2)
+        reviewed_archive = old.key == reviewed_key and category in (4, 6, 7)
+        if (old.name != installed.name and old.enabled and binding.get('mod_id') == mod_id
+                and binding.get('inventory_date') == old.date
+                and (known_main or reviewed_archive) and old_roots == roots
+                and old_components <= components):
+            result.append(old)
+    return result
 
 
 def update_status(entry, binding, files):

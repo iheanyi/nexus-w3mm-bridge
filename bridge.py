@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 from bridge_core import BridgeError, ModLink, NexusBridge, file_upload_date, parse_link, safe_archive_name, file_digest, expected_digest
 from inventory import (archive_layout, archive_matches, archive_members, binding_for, from_model, inspect_install_archive,
                        game_directory, import_archives, library_path, read_inventory, read_library,
-                       save_library, update_status)
+                       missing_payloads, replaced_entries, save_library, update_status)
 
 ROOT = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 USER_DIR = Path(os.environ['LOCALAPPDATA']) / 'NexusW3MMBridge'
@@ -185,6 +186,28 @@ class Manager:
         self.config.write_config().join()
         self.model.write()
 
+    def retire_replaced(self, previous, installed, bindings, source, reviewed_key=None):
+        """Change inventory ownership only; never call the W3MM uninstaller."""
+        current = from_model(self.model)
+        if installed not in current:
+            return []
+        candidates = [old for old in replaced_entries(previous, installed, bindings, *source, reviewed_key)
+                      if old in current]
+        if not candidates:
+            return []
+        backup_root = USER_DIR / 'backups'
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup = Path(tempfile.mkdtemp(prefix='before-update-cleanup-', dir=backup_root))
+        shutil.copy2(self.model.xmlfile, backup / 'installed.xml')
+        original = dict(self.model.modList)
+        for old in candidates:
+            del self.model.modList[old.name]
+        if not self.model.write():
+            self.model.modList = original
+            raise BridgeError('The update installed, but the old inventory entry could not be removed. Do not uninstall it; retry after resolving the inventory save error.')
+        self.widget.refreshList()
+        return candidates
+
 
 STYLE = '''
 QWidget#bridgeRoot { background: #171819; color: #eeeeeb; }
@@ -230,6 +253,7 @@ class BridgeWindow(QMainWindow):
         self.queued_links = []
         self.installing = False
         self.entries = []
+        self.missing_payloads = {}
         self.bindings = {}
         self.nexus_cache = read_library(USER_DIR / 'nexus-cache.json')
         self.inventory_snapshot = None
@@ -437,12 +461,15 @@ class BridgeWindow(QMainWindow):
         except BridgeError as error:
             self.library_origin.setText(str(error))
             return
-        snapshot = (folder, tuple(entries))
+        game = game_directory(Path(folder))
+        missing = {entry.key: tuple(missing_payloads(entry, game)) for entry in entries}
+        snapshot = (folder, tuple(entries), tuple(missing.items()))
         if snapshot == self.inventory_snapshot and not force:
             return
         previous = self.selected_entry()
         self.inventory_snapshot = snapshot
         self.entries = entries
+        self.missing_payloads = missing
         self.library_file = library_path(USER_DIR, Path(folder))
         self.bindings = read_library(self.library_file)
         self.library_summary.setText(f'{len(entries)} mods in W3MM')
@@ -460,11 +487,14 @@ class BridgeWindow(QMainWindow):
             status, _ = update_status(entry, binding, cache[1] if cache else None)
             if binding and binding['mod_id'] in self.check_errors:
                 status = 'Check failed — retry'
+            if self.missing_payloads.get(entry.key):
+                status = 'Files missing — reinstall'
             version = binding.get('version') if binding and binding.get('inventory_date') == entry.date else 'Unknown'
             for col, value in enumerate((entry.name, 'Enabled' if entry.enabled else 'Disabled', version or 'Unknown', status)):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.ItemDataRole.UserRole, entry)
-                item.setToolTip(str(value))
+                item.setToolTip('Missing folders: ' + ', '.join(self.missing_payloads[entry.key])
+                               if col == 3 and self.missing_payloads.get(entry.key) else str(value))
                 self.installed_table.setItem(row, col, item)
             self.installed_table.setRowHeight(row, 40)
             if entry.key == selected_key:
@@ -590,7 +620,7 @@ class BridgeWindow(QMainWindow):
         self.status.setText('Installed file linked. Refresh will check its Nexus page for newer files.')
         self.tabs.setCurrentWidget(self.library_page)
 
-    def work(self, fn, callback, *, download=False):
+    def work(self, fn, callback, *, download=False, cleanup=None):
         if self.job is not None:
             return
         self.job = Worker(fn)
@@ -625,12 +655,18 @@ class BridgeWindow(QMainWindow):
 
         def success(value):
             finish()
-            callback(value)
+            try:
+                callback(value)
+            finally:
+                if cleanup:
+                    cleanup()
 
         def failed(message):
             finish()
             self.progress.setValue(0)
             self.status.setText(message)
+            if cleanup:
+                cleanup()
 
         worker.done.connect(success)
         worker.failed.connect(failed)
@@ -877,6 +913,9 @@ class BridgeWindow(QMainWindow):
                     return
             manager = self.open_manager()
             if manager:
+                previous = from_model(manager.model)
+                bindings = dict(self.bindings)
+                reviewed_key = self.tracking_entry.key if self.tracking_entry else None
                 self.installing = True
                 try:
                     outcome = manager.install([str(self.archive)])
@@ -884,7 +923,7 @@ class BridgeWindow(QMainWindow):
                     self.installing = False
                 self.sync_inventory(force=True)
                 if outcome and outcome[0] > 0 and outcome[1] == 0 and outcome[2] == 0 and self.archive_source:
-                    self.verify_install(members)
+                    self.verify_install(members, previous, bindings, reviewed_key)
                 else:
                     self.status.setText('Review W3MM’s result. Tracking was not advanced for a skipped, failed, or incomplete install.')
         except BridgeError as error:
@@ -892,7 +931,7 @@ class BridgeWindow(QMainWindow):
         if self.queued_links:
             QTimer.singleShot(0, lambda: self.receive_link(self.queued_links.pop(0)))
 
-    def verify_install(self, members):
+    def verify_install(self, members, previous=(), bindings=None, reviewed_key=None):
         from src.domain.mod import Mod
         archive, source = self.archive, self.archive_source
         entries = [e for e in self.entries if e.name == Mod.formatName(archive.name)]
@@ -901,13 +940,32 @@ class BridgeWindow(QMainWindow):
             return [e for e in entries if archive_matches(e, members, archive, game_directory(folder), ROOT / 'tools/7zip/7z.exe')]
         def verified(matches):
             self.sync_inventory(force=True)
+            retired = []
+            cleanup_error = None
+            for entry in matches:
+                if entry in self.entries:
+                    try:
+                        retired.extend(self.manager.retire_replaced(previous, entry, bindings or {}, source, reviewed_key))
+                    except (BridgeError, OSError) as error:
+                        cleanup_error = str(error)
+            self.sync_inventory(force=True)
+            for old in retired:
+                self.bindings.pop(old.key, None)
             for entry in matches:
                 if entry in self.entries:
                     self.bindings[entry.key] = binding_for(entry, source[0], source[1], evidence='W3MM install completed; installed payload matched')
             save_library(self.library_file, self.bindings)
             self.render_library()
-            self.status.setText('Installed and tracked. Run Script Merger for affected conflicts.' if matches else 'W3MM finished. Version could not be verified; link the installed file manually.')
-        self.work(verify, verified)
+            if cleanup_error:
+                self.status.setText('Installed and verified. Inventory cleanup needs attention: ' + cleanup_error)
+            elif matches:
+                noun = 'entry' if len(retired) == 1 else 'entries'
+                replaced = f' Replaced {len(retired)} old inventory {noun}; current files kept.' if retired else ''
+                self.status.setText('Installed and tracked.' + replaced + ' Run Script Merger for affected conflicts.')
+            else:
+                self.status.setText('W3MM finished. Version could not be verified; the old entry was kept. Link the installed file manually.')
+        self.manager.window.setEnabled(False)
+        self.work(verify, verified, cleanup=lambda: self.manager.window.setEnabled(True))
 
     def toggle_protocol(self, enabled):
         try:

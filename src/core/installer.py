@@ -71,6 +71,7 @@ class Installer:
 
             self.progress(0.2)
             res = None
+            skipped = 0
 
             for index, directory in enumerate(directories):
                 root, name = path.split(directory)
@@ -92,10 +93,10 @@ class Installer:
                             self.ask = False
                             copyFolder(directory, datapath)
                             installCount += 1
-                        elif res == QMessageBox.StandardButton.No:
-                            pass
-                        elif res == QMessageBox.StandardButton.NoToAll:
-                            self.ask = False
+                        else:
+                            if res == QMessageBox.StandardButton.NoToAll:
+                                self.ask = False
+                            skipped += 1
                     else:
                         copyFolder(directory, datapath)
                         installCount += 1
@@ -117,6 +118,11 @@ class Installer:
                         )
                     )
                 self.progress(0.2 + (0.5 / len(directories)) * (index + 1))
+
+            if skipped:
+                # Do not claim a new version, overwrite its settings, or retire
+                # its prior record when any of its payload was declined.
+                return True, installCount, int(installCount > 0)
 
             keep_disabled = (
                 not mod.files
@@ -239,6 +245,18 @@ class Installer:
     def uninstallMod(self, mod: Mod) -> bool:
         '''Uninstalls given mod'''
         try:
+            # Different archive names can leave several records owning the
+            # same installed files. Never delete another record's payload.
+            def owned(record):
+                return {(kind, name.casefold()) for kind, names in
+                        (('data', record.files), ('dlc', record.dlcs), ('menu', record.menus), ('ini', record.inis))
+                        for name in names}
+            shared_with = [other.name for other in self.model.all()
+                           if other.name != mod.name and owned(mod) & owned(other)]
+            if shared_with:
+                self.output('No files removed. This entry shares installed files with: ' + ', '.join(shared_with)
+                            + '. Update through the Nexus bridge to retire a verified old entry without uninstalling shared files.')
+                return False
             self.output(translate("MainWindow", "Uninstalling") + " " + mod.name)
             if not mod.enabled:
                 incomplete = mod.enable()

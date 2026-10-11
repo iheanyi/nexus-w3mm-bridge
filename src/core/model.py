@@ -81,7 +81,7 @@ class Model:
             mods[mod.name] = mod
         return mods
 
-    def write(self) -> None:
+    def write(self) -> bool:
         newfile = self.xmlfile + ".new"
         oldfile = self.xmlfile + ".old"
         try:
@@ -108,8 +108,10 @@ class Model:
             self._readInventory(newfile)
             os.replace(newfile, self.xmlfile)
             self._inventorySource = self.xmlfile
+            return True
         except Exception as e:
             MessageAlertWritingFailed(self.xmlfile, e)
+            return False
 
     def get(self, modname: str) -> Mod:
         return self.modList[modname]
