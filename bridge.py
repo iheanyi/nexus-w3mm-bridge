@@ -28,9 +28,11 @@ from bridge_core import BridgeError, ModLink, NexusBridge, file_upload_date, par
 from inventory import (archive_layout, archive_matches, archive_members, binding_for, from_model, inspect_install_archive,
                        game_directory, import_archives, library_path, read_inventory, read_library,
                        missing_payloads, replaced_entries, save_library, update_status)
+from windows_setup import (user_folder, manager_config_candidates, registered_nxm_command,
+                           vortex_arguments, is_bridge_command)
 
-ROOT = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-USER_DIR = Path(os.environ['LOCALAPPDATA']) / 'NexusW3MMBridge'
+ROOT = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
+USER_DIR = user_folder('local') / 'NexusW3MMBridge'
 PREFS_PATH = USER_DIR / 'settings.json'
 DOWNLOADS = USER_DIR / 'downloads'
 SERVER_NAME = 'NexusW3MMBridge-' + hashlib.sha256(str(USER_DIR).lower().encode()).hexdigest()[:16]
@@ -39,7 +41,9 @@ SERVER_NAME = 'NexusW3MMBridge-' + hashlib.sha256(str(USER_DIR).lower().encode()
 def read_prefs():
     for file in (PREFS_PATH, ROOT / 'defaults.json'):
         try:
-            return json.loads(file.read_text('utf-8-sig'))
+            prefs = json.loads(file.read_text('utf-8-sig'))
+            if isinstance(prefs, dict):
+                return prefs
         except (OSError, ValueError):
             pass
     return {}
@@ -69,12 +73,7 @@ def protocol_command():
 
 
 def protocol_enabled():
-    import winreg
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\nxm\shell\open\command') as key:
-            return winreg.QueryValueEx(key, '')[0] == protocol_command()
-    except OSError:
-        return False
+    return registered_nxm_command() == protocol_command()
 
 
 def set_protocol(enabled, prefs):
@@ -83,13 +82,17 @@ def set_protocol(enabled, prefs):
     if enabled:
         if protocol_enabled():
             return
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            previous = winreg.QueryValueEx(key, '')[0]
-        # The current machine uses Vortex. Preserve that exact registration for undo.
-        if 'Vortex.exe' not in previous:
-            raise BridgeError('Your Nexus handler is not Vortex. Keep using paste-a-link mode on this setup.')
+        previous = registered_nxm_command()
+        if is_bridge_command(previous):
+            previous = prefs.get('previous_nxm_command', '')
+        try:
+            vortex_arguments(previous, 'nxm://witcher3/mods/1/files/1')
+        except ValueError:
+            raise BridgeError('Register Nexus download links in Vortex first, or keep using paste-a-link mode.') from None
         prefs['previous_nxm_command'] = previous
         save_prefs(prefs)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Classes\nxm') as key:
+            winreg.SetValueEx(key, 'URL Protocol', 0, winreg.REG_SZ, '')
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
             winreg.SetValueEx(key, '', 0, winreg.REG_SZ, protocol_command())
     else:
@@ -106,10 +109,16 @@ def forward_other_game(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != 'nxm' or parsed.hostname == 'witcher3':
         return False
-    vortex = Path(os.environ.get('PROGRAMFILES', r'C:\Program Files')) / 'Black Tree Gaming Ltd/Vortex/Vortex.exe'
-    if not vortex.is_file() or len(url) > 8192 or any(c in url for c in '\r\n\x00'):
+    if len(url) > 8192 or any(c in url for c in '\r\n\x00'):
         raise BridgeError('Cannot forward this Nexus link to Vortex.')
-    subprocess.Popen([str(vortex), '-d', url], shell=False)
+    command = registered_nxm_command()
+    if is_bridge_command(command):
+        command = read_prefs().get('previous_nxm_command', '')
+    try:
+        args = vortex_arguments(command, url)
+        subprocess.Popen(args, shell=False)
+    except (ValueError, OSError):
+        raise BridgeError('Cannot find the registered Vortex handler. Re-register Nexus links in Vortex, then enable them in this bridge again.') from None
     return True
 
 
@@ -239,7 +248,7 @@ QTabBar::tab:selected { color: #e1c58f; border-bottom: 2px solid #d4b377; }
 
 
 class BridgeWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, connect_on_start=True):
         super().__init__()
         self.prefs = read_prefs()
         self.api = NexusBridge()
@@ -396,7 +405,8 @@ class BridgeWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_download)
         bottom.addWidget(self.cancel_button)
         layout.addLayout(bottom)
-        QTimer.singleShot(0, self.connect_account)
+        if connect_on_start:
+            QTimer.singleShot(0, self.connect_account)
         self.sync_inventory(force=True)
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.sync_inventory)
@@ -454,7 +464,8 @@ class BridgeWindow(QMainWindow):
     def sync_inventory(self, force=False):
         folder = self.prefs.get('manager_config_dir')
         if not folder:
-            self.library_origin.setText('Choose your existing W3MM executable in Settings to show installed mods.')
+            self.library_summary.setText('Choose your W3MM installation')
+            self.library_origin.setText('Use Settings to select your W3MM executable or installed.xml and show installed mods.')
             return
         try:
             entries = from_model(self.manager.model) if self.manager else read_inventory(Path(folder))
@@ -548,7 +559,7 @@ class BridgeWindow(QMainWindow):
         if self.job or not self.entries:
             return
         folder = Path(self.prefs['manager_config_dir'])
-        dirs = [Path(os.environ['APPDATA']) / 'Vortex/downloads/witcher3', Path.home() / 'Downloads']
+        dirs = [user_folder('roaming') / 'Vortex/downloads/witcher3', user_folder('downloads'), DOWNLOADS]
         config = configparser.ConfigParser(interpolation=None)
         config.read(folder / 'config.ini', encoding='utf-8-sig')
         if config.get('PATHS', 'lastpath', fallback=''):
@@ -848,12 +859,24 @@ class BridgeWindow(QMainWindow):
         if self.manager:
             QMessageBox.information(self, 'Restart to change manager', 'Restart the bridge before choosing a different W3MM installation.')
             return
-        filename, _ = QFileDialog.getOpenFileName(self, 'Choose TheWitcher3ModManager.exe', self.prefs.get('manager_config_dir', ''), 'W3MM executable (*.exe)')
+        filename, _ = QFileDialog.getOpenFileName(self, 'Choose W3MM or its inventory', self.prefs.get('manager_config_dir', ''), 'W3MM or inventory (*.exe installed.xml config.ini)')
         if filename:
-            folder = Path(filename).parent
-            if not (folder / 'config.ini').is_file():
-                QMessageBox.information(self, 'Configuration not found', 'Choose the W3MM installation that contains your config.ini and installed.xml.')
-                return
+            candidates = manager_config_candidates(filename)
+            if len(candidates) > 1:
+                choice, ok = QInputDialog.getItem(self, 'Choose W3MM inventory', 'Multiple inventories found. Choose the one used by your W3MM:', [str(p) for p in candidates], 0, False)
+                if not ok:
+                    return
+                folder = Path(choice)
+            elif candidates:
+                folder = candidates[0]
+            else:
+                inventory, _ = QFileDialog.getOpenFileName(self, 'Locate your W3MM installed.xml or config.ini', str(Path(filename).parent), 'W3MM inventory (installed.xml config.ini)')
+                candidates = manager_config_candidates(inventory) if inventory else []
+                if not candidates:
+                    if inventory:
+                        QMessageBox.information(self, 'Inventory not found', 'Select the folder containing both config.ini and installed.xml. Open and configure W3MM first if this is a new installation.')
+                    return
+                folder = candidates[0]
             self.prefs['manager_config_dir'] = str(folder)
             save_prefs(self.prefs)
             self.inventory_snapshot = None
@@ -1005,11 +1028,18 @@ def main():
     from src.gui.themes import get_dark_palette
     app.setPalette(get_dark_palette())
     argument = sys.argv[1] if len(sys.argv) > 1 else ''
+    if argument == '--smoke-test' and len(sys.argv) == 3:
+        from smoke_test import run
+        return run(sys.modules[__name__], app, Path(sys.argv[2]))
     if argument in {'--register', '--unregister'}:
         set_protocol(argument == '--register', read_prefs())
         return 0
-    if argument and forward_other_game(argument):
-        return 0
+    try:
+        if argument and forward_other_game(argument):
+            return 0
+    except BridgeError as error:
+        QMessageBox.information(None, 'Nexus link handoff', str(error))
+        return 1
     if argument:
         try:
             parse_link(argument)

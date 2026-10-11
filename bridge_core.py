@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from windows_setup import user_folder
+
 
 class BridgeError(Exception):
     pass
@@ -110,7 +112,7 @@ class NexusBridge:
     OPERATIONS = {'nexus_account', 'nexus_mod', 'nexus_mod_files', 'nexus_download_links'}
 
     def __init__(self, connection_file: Path | None = None):
-        self.connection_file = connection_file or Path(os.environ['APPDATA']) / 'Vortex/nexusmods-mcp/bridge.json'
+        self.connection_file = connection_file or user_folder('roaming') / 'Vortex/nexusmods-mcp/bridge.json'
 
     def rpc(self, operation: str, **params):
         if operation not in self.OPERATIONS:

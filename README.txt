@@ -1,4 +1,4 @@
-Nexus → W3MM | 1.1.3
+Nexus → W3MM | 1.1.4
 
 See README.md for setup, inventory sync, exact-file tracking, and builds.
 Source: https://github.com/iheanyi/nexus-w3mm-bridge

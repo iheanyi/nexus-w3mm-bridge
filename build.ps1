@@ -43,3 +43,5 @@ Get-ChildItem -LiteralPath $sitePackages -Directory -Filter '*.dist-info' | ForE
         $files | Copy-Item -Destination $dest -Force
     }
 }
+& $venvPython (Join-Path $PSScriptRoot 'verify_package.py') $target
+if ($LASTEXITCODE -ne 0) { throw 'Packaged application smoke test failed' }

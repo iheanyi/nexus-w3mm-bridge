@@ -6,13 +6,23 @@ A Windows companion for downloading Witcher 3 mods from Nexus and updating them 
 
 1. Download the Windows ZIP from [Releases](https://github.com/iheanyi/nexus-w3mm-bridge/releases), extract the entire folder, and run `NexusW3MMBridge.exe`.
 2. Keep [Vortex](https://www.nexusmods.com/about/vortex/) running and signed into Nexus, with the [Nexus Mods MCP Bridge extension](https://github.com/iheanyi/nexusmods-mcp) enabled. Follow that project's extension installation instructions. This companion reuses its local authenticated connection; no API key is entered here.
-3. Choose **Settings → Choose W3MM installation**, then select your existing `TheWitcher3ModManager.exe`. Its directory must contain `config.ini` and `installed.xml`.
+3. Choose **Settings → Choose W3MM installation**, then select your existing `TheWitcher3ModManager.exe`, `installed.xml`, or `config.ini`. The bridge checks beside the executable and the standard Windows user folders. If several inventories exist, choose yours; for a custom location, select its inventory file. The inventory folder must contain both `config.ini` and `installed.xml`. Open and configure W3MM first on a new installation.
 4. Your installed mods appear immediately, even without a Nexus connection. The list follows W3MM changes every two seconds. **Refresh & check updates** reads the inventory again and checks linked Nexus pages.
 5. Select a mod and choose **Review files / update**. Choose the intended archive, read its requirements, then **Download & open in W3MM**. Close the game before installation and run Script Merger for affected conflicts afterward.
 
 The original W3MM and the companion's embedded manager share the same inventory lock. Close the original manager before opening the embedded one. Reading the Installed tab does not acquire that lock or change W3MM files.
 
 Keep the W3MM window opened by the bridge running while downloading more mods; subsequent installs reuse it. The original standalone executable is a separate process, so it cannot own the inventory at the same time.
+
+## Using the ZIP on another computer
+
+The release is a self-contained **Windows x64** application. Extract the whole folder on each PC; Python, a developer checkout, and Codex are not required. macOS, Linux/Steam Deck, and native ARM64 packages are not provided. The application is unsigned.
+
+Each Windows account keeps its own settings and downloads under its Local AppData folder. The ZIP contains no author's inventory, account token, game path, or downloaded mods. On a new PC, sign into that PC's Vortex bridge and choose that PC's W3MM inventory. This does not migrate game files or installed mods between PCs. Game and manager folders must be writable by your account; the bridge does not request administrator privileges.
+
+Vortex and its Nexus Mods MCP Bridge extension are required for Nexus access; they are not bundled. The installed-mod list remains usable offline. Windows known-folder locations support redirected Documents and Downloads, including OneDrive. Custom Vortex download locations can be matched via W3MM's last-used folder; archives outside the searched locations can be linked manually.
+
+You can move the extracted application folder. If you enabled Nexus download buttons, enable that setting again from the new location to refresh its per-user registration. Forwarding to other games preserves the original Vortex executable path and arguments, including custom and per-user installations.
 
 ## Updating without duplicate entries
 
@@ -41,7 +51,7 @@ For an unmatched entry, use **Link / change Nexus file**, paste its Nexus page, 
 
 ## Nexus download buttons
 
-**Settings → Use Nexus download buttons** registers a per-user `nxm:` handler. Witcher 3 links go here; other games go to Vortex. Disable the setting to restore the previous Vortex command. Keep the app folder in place while it is registered. The existing handler must be Vortex.
+**Settings → Use Nexus download buttons** registers a per-user `nxm:` handler. Witcher 3 links go here; other games go to the registered Vortex installation. Disable the setting to restore the previous Vortex command. Register Nexus links in Vortex first if there is no Vortex handler. After moving the bridge folder, re-enable this setting from its new location.
 
 Free accounts should use Nexus's **Mod Manager Download** button, which supplies a short-lived download key. Premium accounts can request the selected file directly. Normal Nexus account restrictions apply. Free-account URL handling is covered by tests; the live download test used a Premium account.
 
@@ -61,7 +71,7 @@ These backups do not include game saves or every installed mod file. The app doe
 
 ## Develop and build
 
-Windows 10/11, Python 3.11 or newer. The packaged application is unsigned.
+Windows x64, Python 3.11 (the version used for release builds). Build and run from a writable directory.
 
 ```powershell
 py -3.11 -m venv .venv
@@ -73,7 +83,9 @@ py -3.11 -m venv .venv
 
 The build is written to `dist/NexusW3MMBridge`. `build.ps1 -Python <path> -OutputDirectory <path>` supports an existing environment and custom output directory. Keep the directory layout intact. No private config or machine-specific default is included in the source or release.
 
-`bridge_core.py` handles Nexus and downloads; `inventory.py` reads W3MM and matches archives; `bridge.py` contains the Qt interface and installer integration. Tests cover inventory changes, variant selection, archive guards, cancellation, and download verification.
+Every build runs the unit/integration tests and `verify_package.py`. That check rejects private state in the package, copies the release to a path containing spaces and Unicode, and launches the EXE from a different working directory with a fresh profile and a Windows-only PATH. It checks the Qt window, embedded W3MM, local settings, bundled assets, and 7-Zip extraction without connecting to Nexus or touching a real game. CI builds and runs these checks on both `windows-2022` and `windows-latest`; downloadable build artifacts are attached to successful runs. This validates clean Windows environments, not every hardware/OS combination.
+
+`bridge_core.py` handles Nexus and downloads; `inventory.py` reads W3MM and matches archives; `bridge.py` contains the Qt interface and installer integration; `windows_setup.py` resolves user folders, manager inventories, and Vortex registrations. Tests cover inventory changes, variant selection, archive guards, cancellation, download verification, and portable Windows setup.
 
 ## Credits and licenses
 
