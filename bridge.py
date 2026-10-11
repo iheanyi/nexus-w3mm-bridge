@@ -1,4 +1,4 @@
-"""A native Nexus companion with an embedded, unmodified W3MM installer."""
+"""A native Nexus companion with an embedded W3MM installer."""
 from __future__ import annotations
 
 import configparser
@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from bridge_core import BridgeError, ModLink, NexusBridge, parse_link
-from inventory import (archive_layout, archive_matches, archive_members, binding_for, from_model,
+from bridge_core import BridgeError, ModLink, NexusBridge, file_upload_date, parse_link, safe_archive_name, file_digest, expected_digest
+from inventory import (archive_layout, archive_matches, archive_members, binding_for, from_model, inspect_install_archive,
                        game_directory, import_archives, library_path, read_inventory, read_library,
                        save_library, update_status)
 
@@ -309,10 +309,11 @@ class BridgeWindow(QMainWindow):
         self.old.toggled.connect(self.render_files)
         row.addWidget(self.old)
         layout.addLayout(row)
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(['FILE', 'VERSION', 'TYPE', 'SIZE'])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(['FILE', 'VERSION', 'UPLOADED', 'TYPE', 'SIZE'])
+        self.table.horizontalHeaderItem(2).setToolTip('Nexus file upload date in your local timezone.')
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column, width in ((1, 100), (2, 110), (3, 90)):
+        for column, width in ((1, 85), (2, 110), (3, 100), (4, 80)):
             self.table.setColumnWidth(column, width)
         self.table.verticalHeader().hide()
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -596,6 +597,8 @@ class BridgeWindow(QMainWindow):
         worker = self.job
         self.workers.add(worker)
         self.find.setEnabled(False)
+        self.table.setEnabled(False)
+        self.old.setEnabled(False)
         self.url.setEnabled(False)
         self.download_button.setEnabled(False)
         self.reopen.setEnabled(False)
@@ -608,6 +611,8 @@ class BridgeWindow(QMainWindow):
         def finish():
             self.job = None
             self.find.setEnabled(True)
+            self.table.setEnabled(True)
+            self.old.setEnabled(True)
             self.url.setEnabled(True)
             self.cancel_button.hide()
             self.progress.setRange(0, 100)
@@ -723,10 +728,12 @@ class BridgeWindow(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
             size = (file.get('size_in_bytes') or (file.get('size_kb') or 0) * 1024) / 1048576
-            values = [file.get('name', 'File'), file.get('version', ''), (file.get('category_name') or '').replace('_', ' ').title(), f'{size:.1f} MB']
+            uploaded, uploaded_detail = file_upload_date(file)
+            values = [file.get('name', 'File'), file.get('version', ''), uploaded, (file.get('category_name') or '').replace('_', ' ').title(), f'{size:.1f} MB']
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 item.setData(Qt.ItemDataRole.UserRole, file)
+                item.setToolTip(uploaded_detail if column == 2 else str(value))
                 self.table.setItem(row, column, item)
             self.table.setRowHeight(row, 39)
         if files:
@@ -751,6 +758,18 @@ class BridgeWindow(QMainWindow):
     def selection_changed(self):
         file = self.selected()
         self.download_button.setEnabled(file is not None and self.job is None)
+        if self.job is None:
+            self.archive = None
+            self.archive_source = None
+            if file and self.link:
+                try:
+                    candidate = DOWNLOADS / str(self.link.mod_id) / str(int(file['file_id'])) / safe_archive_name(file['file_name'])
+                    if candidate.is_file():
+                        self.archive = candidate
+                        self.archive_source = (self.link.mod_id, dict(file))
+                except (BridgeError, KeyError, ValueError, OSError):
+                    pass
+            self.reopen.setEnabled(self.archive is not None)
         if file:
             detail = file.get('changelog_html') or file.get('description') or 'Read the mod description for requirements and compatibility.'
             installed = [e for e in self.entries if self.bindings.get(e.key, {}).get('mod_id') == (self.link.mod_id if self.link else None)
@@ -825,14 +844,30 @@ class BridgeWindow(QMainWindow):
         return None
 
     def handoff(self):
-        if not self.archive:
+        if not self.archive or self.job or self.installing:
             return
+        archive, source = self.archive, self.archive_source
+        def inspect(worker):
+            if not archive.is_file():
+                raise BridgeError('The saved archive is missing. Download this file again.')
+            if source:
+                size = int(source[1].get('size_in_bytes') or 0)
+                digest = expected_digest(source[1])
+                if ((size and archive.stat().st_size != size) or (digest and file_digest(archive) != digest)):
+                    raise BridgeError('The saved archive failed verification. Download this file again.')
+            return inspect_install_archive(archive, ROOT / 'tools/7zip/7z.exe')
+        def ready(result):
+            self.archive, self.archive_source = archive, source
+            self.install_prepared(result)
+        self.status.setText('Verifying the saved archive and its installer instructions…')
+        self.work(inspect, ready)
+
+    def install_prepared(self, inspected):
         try:
             if running_game():
                 self.status.setText('Downloaded. Exit The Witcher 3, then click Open in W3MM to install.')
                 return
-            members = archive_members(self.archive, ROOT / 'tools/7zip/7z.exe')
-            folders = archive_layout(members)
+            members, folders = inspected
             if len(folders) > 1:
                 answer = QMessageBox.question(self, 'Review archive components',
                     'W3MM will install every component in this archive:\n\n' + '\n'.join(folders[:25]) +
@@ -889,8 +924,11 @@ class BridgeWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl('https://www.nexusmods.com/witcher3'))
 
     def open_downloads(self):
-        DOWNLOADS.mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(DOWNLOADS)))
+        try:
+            DOWNLOADS.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(DOWNLOADS.resolve()), 'explore')
+        except OSError as error:
+            self.status.setText(f'Could not open Downloads: {error.strerror or error}. Folder: {DOWNLOADS}')
 
     def closeEvent(self, event):
         if self.workers:

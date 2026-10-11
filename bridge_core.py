@@ -10,11 +10,29 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 class BridgeError(Exception):
     pass
+
+
+def file_upload_date(file: dict) -> tuple[str, str]:
+    """Nexus file upload time, rendered in the user's local timezone."""
+    try:
+        timestamp = int(file.get('uploaded_timestamp') or 0)
+        if timestamp > 0:
+            uploaded = datetime.fromtimestamp(timestamp, timezone.utc)
+        else:
+            uploaded = datetime.fromisoformat(str(file.get('uploaded_time') or '').replace('Z', '+00:00'))
+            if uploaded.tzinfo is None:
+                uploaded = uploaded.replace(tzinfo=timezone.utc)
+        local = uploaded.astimezone()
+        return local.strftime('%Y-%m-%d'), ('Uploaded to Nexus: ' + local.strftime('%Y-%m-%d %H:%M:%S %Z (UTC%z)')
+                                         + '\n' + uploaded.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC'))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return 'Unknown', 'Nexus did not provide a valid upload date for this file.'
 
 
 @dataclass(frozen=True)

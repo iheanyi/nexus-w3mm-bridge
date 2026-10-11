@@ -56,7 +56,10 @@ def fetchModFromDirectory(modPath: str) -> Tuple[Mod, List[str], List[str]]:
     mod_dirs: List[str] = []
     config_files: List[str] = []
     mod_readmes: List[str] = []
-    for current_dir, _, _ in walk(modPath):
+    for current_dir, subdirs, _ in walk(modPath):
+        # FOMOD XML describes an installer, not an in-game menu. The bridge
+        # validates supported installer plans before reaching this scanner.
+        subdirs[:] = [name for name in subdirs if name.casefold() != 'fomod']
         if fetchDataIfRelevantFolder(current_dir, mod):
             mod_dirs.append(normalizePath(current_dir))
         config_files += fetchDataFromRelevantFiles(current_dir, mod)

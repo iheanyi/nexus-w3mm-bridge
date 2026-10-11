@@ -142,6 +142,55 @@ def archive_layout(members, *, inspection_only=False):
     return sorted(folders)
 
 
+def validate_required_fomod(xml, members):
+    """Accept only a plain copy of canonical game roots, with no installer choices."""
+    message = ('This archive needs installer choices or custom file placement. '
+               'Follow the author’s manual instructions; the bridge will not install every alternative.')
+    try:
+        if len(xml) > 1024 * 1024 or b'<!DOCTYPE' in xml.upper() or b'<!ENTITY' in xml.upper():
+            raise ValueError('Unsupported XML')
+        root = ET.fromstring(xml)
+        if root.tag != 'config' or any(child.tag not in {'moduleName', 'moduleImage', 'requiredInstallFiles'} for child in root):
+            raise ValueError('Custom installer')
+        required = root.findall('requiredInstallFiles')
+        if len(required) != 1 or not len(required[0]):
+            raise ValueError('Missing files')
+        roots = set()
+        for item in required[0]:
+            source = item.get('source', '').replace('\\', '/').rstrip('/').casefold()
+            destination = item.get('destination', '').replace('\\', '/').rstrip('/').casefold()
+            if (item.tag != 'folder' or len(item) or source not in {'mods', 'dlc', 'bin'} or source != destination
+                    or set(item.attrib) - {'source', 'destination', 'priority'}):
+                raise ValueError('Noncanonical copy')
+            roots.add(source)
+        for member in members:
+            parts = PurePosixPath(member).parts
+            first = parts[0].casefold() if parts else ''
+            if first in {'mods', 'dlc', 'bin'} and first not in roots:
+                raise ValueError('Unselected game files')
+        folders = archive_layout([m for m in members if not m.casefold().endswith('fomod/moduleconfig.xml')])
+        if any(PurePosixPath(folder).parts[0].casefold() not in roots for folder in folders):
+            raise ValueError('Unselected mod folder')
+    except (ET.ParseError, ValueError, TypeError):
+        raise BridgeError(message) from None
+
+
+def inspect_install_archive(archive, seven_zip):
+    members = archive_members(archive, seven_zip)
+    archive_layout(members, inspection_only=True)  # Always validate paths first.
+    configs = [m for m in members if m.casefold().endswith('fomod/moduleconfig.xml')]
+    if configs:
+        if len(configs) != 1 or configs[0].casefold() != 'fomod/moduleconfig.xml':
+            raise BridgeError('This archive has a custom installer layout. Follow its manual installation instructions.')
+        result = subprocess.run([str(seven_zip), 'x', '-so', '-spd', str(archive), configs[0]],
+                                capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), timeout=45)
+        if result.returncode:
+            raise BridgeError('Could not read the archive’s installer instructions.')
+        validate_required_fomod(result.stdout, members)
+    folders = archive_layout([m for m in members if m not in configs])
+    return members, folders
+
+
 def guess_mod_id(name):
     match = re.search(r' (\d+) \S+ \d{4}-\d{2}-\d{2}T', name)
     if not match:

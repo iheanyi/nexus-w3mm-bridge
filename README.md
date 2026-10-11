@@ -22,12 +22,12 @@ For an unmatched entry, use **Link / change Nexus file**, paste its Nexus page, 
 
 ## Multiple files, optional files, and variants
 
-- Every Nexus archive is listed separately with its version and Main / Optional / Update / Miscellaneous category. Old and archived files are hidden until you enable **Show old versions**.
+- Every Nexus archive is listed separately with its version, local upload date, and Main / Optional / Update / Miscellaneous category. Hover over the date for the exact local and UTC timestamps. Old and archived files are hidden until you enable **Show old versions**.
 - Install a main archive and any desired optional archives individually. Each W3MM inventory record is linked to its own Nexus file ID. Optional files are never automatically added, and the page's latest version is not assigned to every component.
 - **Newer file — review** is a suggestion based on an exact file-name match and upload time. Nexus's local bridge does not expose authoritative file replacement chains. A changed name, a different category, or multiple candidates is shown as **New files — choose variant**. Neither status guarantees game-version compatibility.
 - Updates always require a file choice. There is no unattended “update all” operation. A Classic / Next-Gen / Remastered switch or an optional compatibility patch needs your review.
-- A single archive can contain several mod or DLC folders. The bridge lists them and asks before handing all of them to W3MM. Archives with duplicate alternative folder names or a FOMOD configuration are blocked from automatic handoff; follow the author's manual installation instructions for those packages. Arbitrary custom installer formats cannot be inferred reliably.
-- A download is not an installation. Tracking advances only after W3MM reports a complete installation and the installed payload matches. Skipped, failed, incomplete, or unverified installations do not become confirmed versions. Menu-only packages can be linked manually.
+- A single archive can contain several mod or DLC folders. The bridge lists them and asks before handing all of them to W3MM. Simple FOMOD configurations that only copy the standard Mods, DLC, or bin folders are supported. Duplicate alternative folders and FOMOD installers with choices, conditions, or custom destinations require manual installation. Arbitrary custom installer formats cannot be inferred reliably.
+- Previously downloaded archives can be opened again after restarting the bridge; their size and published hash are rechecked before installation. A download is not an installation. Tracking advances only after W3MM reports a complete installation and the installed payload matches. Skipped, failed, incomplete, or unverified installations do not become confirmed versions. Menu-only packages can be linked manually.
 
 ## Nexus download buttons
 
@@ -67,6 +67,6 @@ The build is written to `dist/NexusW3MMBridge`. `build.ps1 -Python <path> -Outpu
 
 ## Credits and licenses
 
-Bridge code: [MIT](LICENSE.txt). Bundled W3MM: [BSD-2-Clause](W3MM-LICENSE.txt), based on [Systemcluster/The-Witcher-3-Mod-manager](https://github.com/Systemcluster/The-Witcher-3-Mod-manager), version 0.10.5, commit `010334e134fb6cc172a28ba76e7cf5c14117c20d`. The bridge adds a return value to `CustomMainWidget.installModFiles` so it can inspect installation results. Other upstream files are retained.
+Bridge code: [MIT](LICENSE.txt). Bundled W3MM: [BSD-2-Clause](W3MM-LICENSE.txt), based on [Systemcluster/The-Witcher-3-Mod-manager](https://github.com/Systemcluster/The-Witcher-3-Mod-manager), version 0.10.5, commit `010334e134fb6cc172a28ba76e7cf5c14117c20d`. The bridge adds a return value to `CustomMainWidget.installModFiles` so it can inspect installation results, and excludes FOMOD metadata from the game-menu scanner. Other upstream files are retained.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled tools and runtime licenses. This is an independent companion, unaffiliated with Nexus Mods or CD PROJEKT RED.

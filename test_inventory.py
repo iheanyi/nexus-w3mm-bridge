@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bridge_core import BridgeError
-from inventory import (InstalledMod, archive_layout, binding_for, library_path, read_inventory,
+from inventory import (InstalledMod, archive_layout, binding_for, library_path, read_inventory, validate_required_fomod,
                        read_library, save_library, update_status)
 
 
@@ -98,6 +98,21 @@ class InventoryTests(unittest.TestCase):
         for name in ('../modA/content/x.ws', '/modA/content/a', 'C:/modA/content/a'):
             with self.assertRaises(BridgeError):
                 archive_layout([name])
+
+    def test_required_fomod_with_standard_folders_is_supported(self):
+        xml = b'<config><moduleName>Example</moduleName><requiredInstallFiles><folder source="Mods" destination="Mods"/><folder source="bin" destination="bin"/></requiredInstallFiles></config>'
+        validate_required_fomod(xml, ['Mods/modA/content/a.ws', 'bin/config/base/a.ini', 'fomod/ModuleConfig.xml'])
+
+    def test_fomod_choices_remapping_and_unselected_payload_are_rejected(self):
+        templates = [
+            '<config><requiredInstallFiles><folder source="Mods" destination="Mods"/></requiredInstallFiles><installSteps/></config>',
+            '<config><requiredInstallFiles><folder source="OptionA" destination="Mods"/></requiredInstallFiles></config>',
+            '<config><requiredInstallFiles><folder source="Mods" destination="../Mods"/></requiredInstallFiles></config>',
+            '<config><requiredInstallFiles><folder source="bin" destination="bin"/></requiredInstallFiles></config>',
+        ]
+        for xml in templates:
+            with self.subTest(xml=xml), self.assertRaises(BridgeError):
+                validate_required_fomod(xml.encode(), ['Mods/modA/content/a.ws', 'fomod/ModuleConfig.xml'])
 
 
 if __name__ == '__main__':
