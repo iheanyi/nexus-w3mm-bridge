@@ -254,6 +254,7 @@ class BridgeWindow(QMainWindow):
         self.api = NexusBridge()
         self.manager = None
         self.job = None
+        self.account_job = None
         self.workers = set()
         self.link = None
         self.files = []
@@ -408,6 +409,7 @@ class BridgeWindow(QMainWindow):
         if connect_on_start:
             QTimer.singleShot(0, self.connect_account)
         self.sync_inventory(force=True)
+        self.library_selection_changed()
         self.sync_timer = QTimer(self)
         self.sync_timer.timeout.connect(self.sync_inventory)
         self.sync_timer.start(2000)
@@ -516,6 +518,8 @@ class BridgeWindow(QMainWindow):
 
     def library_selection_changed(self):
         entry = self.selected_entry()
+        self.refresh_button.setEnabled(self.job is None)
+        self.import_button.setEnabled(bool(self.entries) and self.job is None)
         self.link_button.setEnabled(entry is not None and self.job is None)
         self.review_button.setEnabled(entry is not None and self.job is None)
         if entry:
@@ -687,21 +691,31 @@ class BridgeWindow(QMainWindow):
         worker.start()
 
     def connect_account(self):
-        if self.job:
+        if self.account_job is not None:
             return
-        self.connection.setText('Connecting to your Nexus session…')
+        self.connection.setText('Checking Nexus connection in the background…')
+        worker = Worker(lambda _: self.api.rpc('nexus_account', timeout=5))
+        self.account_job = worker
+        self.workers.add(worker)
 
         def connected(account):
+            self.account_job = None
             if account.get('authenticated'):
                 self.connection.setText('● Connected through Vortex' + ('  ·  Nexus Premium' if account.get('premium') else '  ·  Use Nexus download buttons for free downloads'))
             else:
                 self.connection.setText('Sign in to Nexus in Vortex, then reconnect.')
-            if self.queued_links:
-                QTimer.singleShot(0, lambda: self.receive_link(self.queued_links.pop(0)))
-            elif account.get('authenticated') and self.entries and not self.bindings:
-                QTimer.singleShot(0, self.match_archives)
 
-        self.work(lambda w: self.api.rpc('nexus_account'), connected)
+        def failed(_message):
+            self.account_job = None
+            self.connection.setText('Nexus unavailable · Your local inventory is ready. Reconnect in Settings.')
+
+        # Account status must never own the download/install busy state, clear a
+        # selected archive, or delay reading the local inventory and saved cache.
+        worker.done.connect(connected)
+        worker.failed.connect(failed)
+        worker.finished.connect(lambda: self.workers.discard(worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def receive_link(self, value):
         self.showNormal()
@@ -1090,7 +1104,7 @@ def main():
     server.newConnection.connect(accept)
     window.show()
     if argument:
-        window.queued_links.append(argument)
+        QTimer.singleShot(0, lambda: window.receive_link(argument))
     return app.exec()
 
 

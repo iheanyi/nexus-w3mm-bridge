@@ -10,6 +10,8 @@ A Windows companion for downloading Witcher 3 mods from Nexus and updating them 
 4. Your installed mods appear immediately, even without a Nexus connection. The list follows W3MM changes every two seconds. **Refresh & check updates** reads the inventory again and checks linked Nexus pages.
 5. Select a mod and choose **Review files / update**. Choose the intended archive, read its requirements, then **Download & open in W3MM**. Close the game before installation and run Script Merger for affected conflicts afterward.
 
+Startup shows the local inventory and saved Nexus metadata immediately. The account status check runs separately in the background with a five-second network timeout; it does not disable inventory actions or start an archive scan. Use **Match existing archives** when you want to recover file associations. **Refresh & check updates** explicitly requests fresh online metadata. A Nexus download link received at launch starts independently of the account status check.
+
 The original W3MM and the companion's embedded manager share the same inventory lock. Close the original manager before opening the embedded one. Reading the Installed tab does not acquire that lock or change W3MM files.
 
 Keep the W3MM window opened by the bridge running while downloading more mods; subsequent installs reuse it. The original standalone executable is a separate process, so it cannot own the inventory at the same time.

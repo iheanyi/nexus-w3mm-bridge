@@ -114,7 +114,7 @@ class NexusBridge:
     def __init__(self, connection_file: Path | None = None):
         self.connection_file = connection_file or user_folder('roaming') / 'Vortex/nexusmods-mcp/bridge.json'
 
-    def rpc(self, operation: str, **params):
+    def rpc(self, operation: str, *, timeout=45, **params):
         if operation not in self.OPERATIONS:
             raise BridgeError('Unsupported operation.')
         try:
@@ -131,7 +131,7 @@ class NexusBridge:
         try:
             # Neither a proxy nor an HTTP redirect may receive the local session token.
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-            with opener.open(request, timeout=45) as response:
+            with opener.open(request, timeout=timeout) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as error:
             if error.code in (401, 403):

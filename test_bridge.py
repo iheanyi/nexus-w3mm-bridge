@@ -54,6 +54,15 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, 'Open Vortex'):
             NexusBridge(Path('missing')).rpc('nexus_account')
 
+    def test_account_timeout_is_local_request_configuration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            connection = Path(temp) / 'bridge.json'
+            connection.write_text(json.dumps({'port': 12345, 'token': 'a' * 64}))
+            with patch('urllib.request.OpenerDirector.open', return_value=Response(b'{"result": {"authenticated": false}}')) as opened:
+                self.assertEqual(NexusBridge(connection).rpc('nexus_account', timeout=5), {'authenticated': False})
+                self.assertEqual(opened.call_args.kwargs['timeout'], 5)
+                self.assertEqual(json.loads(opened.call_args.args[0].data)['input'], {})
+
     def make_download(self, folder, data=b'archive', size=None, digest=None, cancel=None):
         bridge = NexusBridge()
         file = {'file_id': 2, 'file_name': 'test.zip', 'size_in_bytes': len(data) if size is None else size,
