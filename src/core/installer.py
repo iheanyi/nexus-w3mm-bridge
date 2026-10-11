@@ -1,0 +1,378 @@
+'''Core functionality'''
+
+from dataclasses import dataclass
+from os import listdir, path
+from shutil import copyfileobj
+from tempfile import TemporaryDirectory
+from time import gmtime, strftime
+from typing import Any, Callable
+
+from PySide6.QtWidgets import QMessageBox
+
+from src.core.fetcher import *
+from src.core.model import Model
+from src.globals import data
+from src.globals.constants import translate
+from src.gui.alerts import MessageAlertModFromGamePath, MessageOverwrite
+from src.util.util import *
+
+
+@dataclass
+class Installer:
+    '''Mod Installer'''
+
+    model: Model
+    ask: bool = True
+
+    progress: Callable[[float], Any] = lambda _: None
+    output: Callable[[str], Any] = lambda _: None
+
+    def installMod(self, modPath: str) -> Tuple[bool, int, int]:
+        '''Installs mod from given path. If given mod is an archive first extracts it'''
+
+        gamePath = data.getConfig().game
+        realModPath = path.realpath(modPath)
+        realGamePath = path.realpath(gamePath) if gamePath else ''
+        try:
+            comparableModPath = path.normcase(realModPath)
+            comparableGamePath = path.normcase(realGamePath)
+            modFromGamePath = bool(
+                comparableGamePath and path.commonpath((comparableModPath, comparableGamePath)) == comparableGamePath
+            )
+        except ValueError:
+            modFromGamePath = False
+        if modFromGamePath:
+            MessageAlertModFromGamePath(realModPath, realGamePath)
+            return False, 0, 0
+
+        installCount = 0
+        incompleteCount = 0
+        modname = path.split(modPath)[1]
+        self.output(translate("MainWindow", "Installing") + " " + Mod.formatName(modname))
+        self.progress(0.1)
+        mod = None
+        result = True
+        extraction = TemporaryDirectory(prefix="tw3mm-")
+        try:
+            mod, directories, config_files = fetchMod(modPath, extraction.name)
+
+            mod.date = strftime("%Y-%m-%d %H:%M:%S", gmtime())
+            mod.name = modname
+            if not Mod.formatName(mod.name):
+                raise ValueError('Mod name must not be empty')
+
+            if not data.getConfig().mods:
+                raise Exception(translate("MainWindow", "Mods folder does not exist and could not be created."))
+            if not data.getConfig().dlc:
+                raise Exception(translate("MainWindow", "DLC folder does not exist and could not be created."))
+
+            installed_mods = listdir(data.getConfig().mods)
+            installed_dlcs = listdir(data.getConfig().dlc)
+
+            self.progress(0.2)
+            res = None
+
+            for index, directory in enumerate(directories):
+                root, name = path.split(directory)
+                _, parent = path.split(root)
+                modfolder = isModFolder(name, parent)
+                dlcfolder = isDlcFolder(name, parent)
+                basepath = data.getConfig().mods if modfolder else (data.getConfig().dlc if dlcfolder else None)
+                if basepath is not None:
+                    datapath = basepath + "/" + name
+                    if (modfolder and name in installed_mods) or (dlcfolder and name in installed_dlcs):
+                        if self.ask:
+                            res = MessageOverwrite(
+                                name, translate("MainWindow", "Mod") if modfolder else translate("MainWindow", "DLC")
+                            )
+                        if res == QMessageBox.StandardButton.Yes:
+                            copyFolder(directory, datapath)
+                            installCount += 1
+                        elif res == QMessageBox.StandardButton.YesToAll:
+                            self.ask = False
+                            copyFolder(directory, datapath)
+                            installCount += 1
+                        elif res == QMessageBox.StandardButton.No:
+                            pass
+                        elif res == QMessageBox.StandardButton.NoToAll:
+                            self.ask = False
+                    else:
+                        copyFolder(directory, datapath)
+                        installCount += 1
+                elif containContentFolder(directory):
+                    try:
+                        ddir = path.relpath(directory, extraction.name)
+                    except:
+                        ddir = ''
+                    self.output(
+                        translate(
+                            "MainWindow", "Detected data folder but could not recognize it as part of a mod or dlc: "
+                        )
+                        + f"{ddir}"
+                    )
+                    self.output(
+                        translate(
+                            "MainWindow",
+                            "  Some manual installation may be required, please check the mod to make sure.",
+                        )
+                    )
+                self.progress(0.2 + (0.5 / len(directories)) * (index + 1))
+
+            keep_disabled = (
+                not mod.files
+                and not mod.dlcs
+                and any(
+                    not installed.enabled and installed.name == mod.name and installed.files == mod.files
+                    for installed in self.model.all()
+                )
+            )
+            for config_file in config_files:
+                directory, name = path.split(config_file)
+                base_ini = isBaseIniFile(directory, name)
+                if keep_disabled and not base_ini and not Mod.isProtectedMenu(name):
+                    name += '.disabled'
+                destination_directory = checkInstalledPath(
+                    path.join(gamePath, 'bin', 'config', 'base') if base_ini else data.getConfig().menu,
+                    modDirectory=False,
+                )
+                target = checkInstalledPath(path.join(destination_directory, name), modDirectory=False)
+                os.makedirs(destination_directory, exist_ok=True)
+                with open(config_file, 'rb') as source, atomicWrite(target, 'wb') as destination:
+                    copyfileobj(source, destination)
+
+            self.progress(0.8)
+
+            if not mod.files and not mod.dlcs and not mod.menus and not mod.inis:
+                raise Exception('No data found in ' + "'" + mod.name + "'")
+
+            incomplete = False
+            try:
+                if not keep_disabled:
+                    mod.installMenus()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + translate("MainWindow", "menu xml files")
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            try:
+                if not keep_disabled:
+                    mod.installXmlKeys()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "input.xml"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            try:
+                added, skipped = mod.installInputKeys()
+                self.output(
+                    translate("MainWindow", "Added")
+                    + f" {added} "
+                    + translate("MainWindow", "input keys")
+                    + (f" ({translate('MainWindow', 'skipped')} {skipped})" if skipped > 0 else "")
+                )
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "input.settings"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            try:
+                mod.installUserSettings()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "user.settings"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            mod.checkPriority()
+
+            if incomplete:
+                incompleteCount += 1
+
+            if mod.readmes:
+                self.output(translate("MainWindow", "Detected one or more README files."))
+                self.output(
+                    translate(
+                        "MainWindow",
+                        "  Some manual configuration may be required, please read the readme to make sure.",
+                    )
+                )
+
+            self.progress(0.9)
+            exists = False
+            for installed in self.model.all():
+                if mod.files == installed.files and mod.name == installed.name:
+                    installed.usersettings = mod.usersettings
+                    installed.hidden = mod.hidden
+                    installed.xmlkeys = mod.xmlkeys
+                    installed.dlcs = mod.dlcs
+                    installed.date = mod.date
+                    installed.menus = mod.menus
+                    installed.inis = mod.inis
+                    installed.inputsettings = mod.inputsettings
+                    installed.readmes = mod.readmes
+                    exists = True
+                    break
+            if not exists:
+                self.model.add(mod.name, mod)
+
+            self.progress(1.0)
+            result = True
+        except Exception as err:
+            self.output(formatUserError(err))
+            result = False
+            installCount = 0
+        finally:
+            extraction.cleanup()
+        return result, installCount, incompleteCount
+
+    def uninstallMod(self, mod: Mod) -> bool:
+        '''Uninstalls given mod'''
+        try:
+            self.output(translate("MainWindow", "Uninstalling") + " " + mod.name)
+            if not mod.enabled:
+                incomplete = mod.enable()
+                if incomplete:
+                    for i in incomplete:
+                        self.output(
+                            translate("MainWindow", "Note: Additions to ")
+                            + i
+                            + translate("MainWindow", " could not be automatically installed.")
+                        )
+            mod.uninstallMenus()
+            mod.uninstallXmlKeys()
+            mod.uninstallUserSettings()
+            self.removeModMenus(mod)
+            for ini in mod.inis:
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + ini
+                    + translate("MainWindow", " will not be removed.")
+                )
+            self.removeModDlcs(mod)
+            self.removeModData(mod)
+            self.model.remove(mod.name)
+            return True
+        except Exception as err:
+            self.output(formatUserError(err))
+            return False
+
+    def reinstallMod(self, mod: Mod) -> Tuple[bool, bool]:
+        try:
+            self.output(translate("MainWindow", "Reinstalling") + " " + mod.name)
+            if not mod.enabled:
+                failed_additions = mod.enable()
+                if failed_additions:
+                    for i in failed_additions:
+                        self.output(
+                            translate("MainWindow", "Note: Additions to ")
+                            + i
+                            + translate("MainWindow", " could not be automatically installed.")
+                        )
+            incomplete = False
+            mod.uninstallUserSettings()
+            try:
+                mod.installUserSettings()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "user.settings"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            mod.uninstallXmlKeys()
+            try:
+                mod.installXmlKeys()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "input.xml"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            mod.uninstallMenus()
+            try:
+                mod.installMenus()
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + translate("MainWindow", "menu xml files")
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            try:
+                added, skipped = mod.installInputKeys()
+                self.output(
+                    translate("MainWindow", "Added")
+                    + f" {added} "
+                    + translate("MainWindow", "input keys")
+                    + (f" ({translate('MainWindow', 'skipped')} {skipped})" if skipped > 0 else "")
+                )
+            except Exception as err:
+                incomplete = True
+                self.output(formatUserError(err))
+                self.output(
+                    translate("MainWindow", "Note: Additions to ")
+                    + "input.settings"
+                    + translate("MainWindow", " could not be automatically installed.")
+                )
+            # TODO: re-fetch and copy xml files
+            return (True, incomplete)
+        except Exception as err:
+            self.output(formatUserError(err))
+            return (False, False)
+
+    def removeModData(self, mod):
+        '''Removes mod data, including folders left behind while the mod was disabled'''
+        mods_directory = data.getConfig().mods
+        if not mods_directory or not path.exists(mods_directory):
+            return
+        for file in mod.files:
+            self._removeInstalledDirectory(mods_directory, file)
+
+    def removeModDlcs(self, mod):
+        '''Removes dlc data, including folders left behind while the mod was disabled'''
+        dlc_directory = data.getConfig().dlc
+        if not dlc_directory or not path.exists(dlc_directory):
+            return
+        for dlc in mod.dlcs:
+            self._removeInstalledDirectory(dlc_directory, dlc)
+
+    @staticmethod
+    def _removeInstalledDirectory(base: str, name: str) -> None:
+        for installed in (name, "~" + name):
+            target = path.join(base, installed)
+            if path.exists(target):
+                removeDirectory(target)
+
+    def removeModMenus(self, mod):
+        '''Removes menu data'''
+        if not data.getConfig().menu or not path.exists(data.getConfig().menu):
+            return
+        for menu in mod.menus:
+            disabled = menu if menu.endswith(".disabled") else menu + ".disabled"
+            for installed in (menu, disabled):
+                target = path.join(data.getConfig().menu, installed)
+                if not path.exists(target):
+                    continue
+                if Mod.isProtectedMenu(menu):
+                    self.output(
+                        translate("MainWindow", "Note: Additions to ")
+                        + menu
+                        + translate("MainWindow", " will not be removed.")
+                    )
+                    break
+                removeInstalledFile(target)

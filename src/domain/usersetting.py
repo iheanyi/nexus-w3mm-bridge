@@ -1,0 +1,14 @@
+'''Usersetting module'''
+
+
+class Usersetting:
+    '''Usersetting objects representing user setting from user.settings'''
+
+    def __init__(self, context: str, config: str):
+        while context[:1] == "[" and context[-1:] == "]":
+            context = context[1:-1]
+        self.context = context
+        self.option, self.value = config.split('=', 1)
+
+    def __repr__(self):
+        return self.option + "=" + self.value

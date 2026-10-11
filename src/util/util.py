@@ -1,0 +1,583 @@
+'''Global Helpers'''
+
+import os
+import re
+import stat
+import subprocess
+import sys
+import traceback
+import webbrowser
+from collections.abc import Callable
+from configparser import ConfigParser
+from contextlib import contextmanager
+from platform import python_version
+from shutil import copytree, rmtree
+from sys import platform
+from tempfile import mkdtemp, mkstemp
+from threading import Timer
+from typing import Any
+
+from PySide6 import QtGui, __version__
+from PySide6.QtCore import QStandardPaths, QTimer
+from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+
+class CaseSensitiveConfigParser(ConfigParser):
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr
+
+
+def formatUserError(error: Exception) -> str:
+    from src.globals import data
+
+    print(traceback.format_exc(), error, file=sys.stderr)
+    if data.debug:
+        return traceback.format_exc() + str(error)
+    else:
+        return str(error)
+
+
+def getDocumentsFolder() -> str:
+    from src.globals.constants import translate
+
+    path = ""
+    if sys.platform == "win32" or sys.platform == "cygwin":
+        from ctypes import create_unicode_buffer, windll, wintypes
+
+        buf = create_unicode_buffer(wintypes.MAX_PATH)
+        windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)
+        path = normalizePath(buf.value)
+    elif platform == "linux" or platform == "darwin":
+        # try steam proton documents path default (1)
+        path = normalizePath(
+            os.path.expanduser(
+                "~/.local/share/Steam/steamapps/compatdata/292030/pfx/drive_c/users/steamuser/My Documents"
+            )
+        )
+        if not path or not os.path.exists(path):
+            # try steam proton documents path default (2)
+            path = normalizePath(
+                os.path.expanduser(
+                    "~/.steam/steam/steamapps/compatdata/292030/pfx/drive_c/users/steamuser/My Documents"
+                )
+            )
+        if not path or not os.path.exists(path):
+            # try steam proton documents path on steam deck internal storage
+            path = normalizePath(
+                "/home/deck/.local/share/Steam/steamapps/compatdata/292030/pfx/drive_c/users/steamuser/My Documents"
+            )
+        if not path or not os.path.exists(path):
+            # try steam proton documents path on steam deck sd card
+            path = normalizePath(
+                "/run/media/mmcblk0p1/steamapps/compatdata/292030/pfx/drive_c/users/steamuser/My Documents"
+            )
+        if not path or not os.path.exists(path):
+            path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+    else:
+        from src.gui.alerts import MessageUnsupportedOS
+
+        MessageUnsupportedOS(platform)
+        sys.exit(1)
+    if not path or not os.path.exists(path):
+        dialog = QFileDialog(
+            None,
+            translate("MainWindow", 'Select "My Documents" directory containing the Witcher 3 config directory'),
+            "My Documents",
+        )
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        if dialog.exec():
+            path = normalizePath(str(dialog.selectedFiles()[0]))
+    return path
+
+
+def getConfigFolder() -> str:
+    path = ""
+    if platform == "win32" or platform == "cygwin":
+        path = getDocumentsFolder()
+    if platform == "linux" or platform == "darwin":
+        path = normalizePath(os.path.expanduser("~/.config"))
+    if not path or path == "":
+        from src.gui.alerts import MessageUnsupportedOS
+
+        MessageUnsupportedOS(platform)
+        sys.exit(1)
+    path = path + '/' + getConfigFolderName()
+    if not os.path.exists(path):
+        path = (
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericConfigLocation)
+            + "/"
+            + getConfigFolderName()
+        )
+    return path
+
+
+def getConfigFolderName() -> str:
+    if platform == "linux" or platform == "darwin":
+        return "TheWitcher3ModManager"
+    return "The Witcher 3 Mod Manager"
+
+
+def getVersionString() -> str:
+    from src.globals.constants import TITLE, VERSION
+
+    return TITLE + " " + VERSION
+
+
+def getProgramRootFolder() -> str:
+    if getattr(sys, 'frozen', False):
+        # The application is frozen
+        return normalizePath(os.path.dirname(sys.executable))
+    else:
+        return normalizePath(os.path.dirname(os.path.abspath(__file__)) + "/../../")
+
+
+def normalizePath(path: str) -> str:
+    return os.path.normpath(str(path)).replace('\\', '/')
+
+
+def reconfigureGamePath() -> bool:
+    from src.globals import data
+    from src.globals.constants import translate
+    from src.gui.alerts import MessageNotConfigured
+
+    MessageNotConfigured()
+    dialog = QFileDialog(
+        None,
+        translate("MainWindow", "Select witcher3.exe"),
+        data.getConfig().gameexe or "witcher3.exe",
+        "witcher3.exe (witcher3.exe);;Executables (*.exe)",
+    )
+    if data.getConfig().get("SETTINGS", "usenativedialog", "1") != "1":
+        dialog.setOptions(QFileDialog.Option.DontUseNativeDialog)
+    if dialog.exec():
+        gamePath = normalizePath(str(dialog.selectedFiles()[0]))
+        try:
+            data.getConfig().gameexe = gamePath
+        except ValueError as err:
+            print(str(err), file=sys.stderr)
+            QMessageBox.critical(
+                None,
+                translate("MainWindow", "Selected file not correct"),
+                translate("MainWindow", "'witcher3.exe' file not selected"),
+                QMessageBox.StandardButton.Ok,
+            )
+            return False
+        return True
+    return False
+
+
+def reconfigureScriptMergerPath():
+    from src.globals import data
+    from src.globals.constants import translate
+    from src.gui.alerts import MessageNotConfiguredScriptMerger
+
+    MessageNotConfiguredScriptMerger()
+    dialog = QFileDialog(
+        None, translate("MainWindow", "Select WitcherScriptMerger.exe"), data.getConfig().scriptmerger or "", "*.exe"
+    )
+    if data.getConfig().get("SETTINGS", "usenativedialog", "1") != "1":
+        dialog.setOptions(QFileDialog.Option.DontUseNativeDialog)
+    if dialog.exec():
+        mergerPath = normalizePath(str(dialog.selectedFiles()[0]))
+        if mergerPath:
+            data.getConfig().scriptmerger = mergerPath
+
+
+def showAboutWindow():
+    from src.globals.constants import AUTHORS, TITLE, VERSION, translate
+
+    QMessageBox.about(
+        None,
+        translate("MainWindow", "About"),
+        ""
+        + TITLE
+        + "\n"
+        + translate("MainWindow", "Version: ")
+        + VERSION
+        + "\n\n"
+        + translate("MainWindow", "Authors: ")
+        + (", ".join(AUTHORS))
+        + "\n"
+        + "\n"
+        + translate("MainWindow", "Written in: ")
+        + "Python "
+        + python_version()
+        + "\n"
+        + translate("MainWindow", "GUI: PySide6 ")
+        + __version__
+        + "\n"
+        + "\n"
+        + translate("MainWindow", "Thank you for using ")
+        + TITLE
+        + translate("MainWindow", "!"),
+    )
+
+
+def openUrl(url: str):
+    webbrowser.open(url)
+
+
+def openFile(path: str):
+    from src.gui.alerts import MessageCouldntOpenFile
+
+    try:
+        if isExecutable(path):
+            directory, _ = os.path.split(path)
+            subprocess.Popen([path], cwd=directory)
+        elif os.path.isfile(path):
+            if platform == "linux" or platform == "darwin":
+                try:
+                    if platform == "linux":
+                        subprocess.call(["xdg-open", path])
+                    if platform == "darwin":
+                        subprocess.Popen(["open", "-t", path])
+                except OSError:
+                    editor = os.getenv('EDITOR')
+                    if editor:
+                        subprocess.Popen([editor, path])
+                    else:
+                        webbrowser.open(path, new=1)
+            elif sys.platform == "win32" or sys.platform == "cygwin":
+                try:
+                    os.startfile(path)
+                except Exception:
+                    webbrowser.open(path, new=1)
+            else:
+                webbrowser.open(path, new=1)
+        elif os.path.isdir(path):
+            openFolder(path)
+        else:
+            raise FileNotFoundError(path)
+    except Exception as e:
+        MessageCouldntOpenFile(path, formatUserError(e))
+
+
+def openFolder(path: str):
+    while path and not os.path.isdir(path):
+        path, _ = os.path.split(path)
+    if platform == "linux" or platform == "darwin":
+        try:
+            if platform == "linux":
+                subprocess.call(["xdg-open", path])
+            if platform == "darwin":
+                subprocess.Popen(["open", path])
+        except OSError:
+            webbrowser.open(path, new=1)
+    elif sys.platform == "win32" or sys.platform == "cygwin":
+        os.startfile(path, "explore")
+    else:
+        webbrowser.open(path, new=1)
+
+
+def checkInstalledPath(target: str, *, modDirectory: bool) -> str:
+    '''Returns an in-game path, allowing links only within the resolved game directory.'''
+    from src.globals import data
+
+    game = data.getConfig().game
+    if not game or not os.path.isabs(game) or not os.path.isabs(target) or ".." in re.split(r"[\\/]", target):
+        raise ValueError(f"Refusing to modify '{target}' outside of the game directory")
+    game = os.path.normpath(game)
+    try:
+        parts = os.path.relpath(target, game).split(os.sep)
+    except ValueError:
+        parts = [os.pardir]
+    if parts[0] in (os.curdir, os.pardir) or (
+        modDirectory and (len(parts) < 2 or parts[0].casefold() not in ("mods", "dlc"))
+    ):
+        raise ValueError(f"Refusing to modify '{target}' outside of the game directory")
+    paths = [game]
+    for part in parts:
+        paths.append(os.path.join(paths[-1], part))
+    resolved_game = os.path.normcase(os.path.realpath(game))
+    for current in paths:
+        if not os.path.lexists(current):
+            break
+        metadata = os.lstat(current)
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            try:
+                try:
+                    resolved = os.path.realpath(current, strict=True)
+                except FileNotFoundError:
+                    resolved = os.path.realpath(current)
+                    missing_parts: list[str] = []
+                    while True:
+                        try:
+                            resolved = os.path.join(os.path.realpath(resolved, strict=True), *reversed(missing_parts))
+                            break
+                        except FileNotFoundError:
+                            parent, name = os.path.split(resolved)
+                            if parent == resolved:
+                                raise
+                            missing_parts.append(name)
+                            resolved = parent
+                resolved = os.path.normcase(resolved)
+                if os.path.commonpath((resolved_game, resolved)) != resolved_game or (
+                    current == paths[-1] and resolved == resolved_game
+                ):
+                    raise ValueError("Link target is not inside the game directory")
+            except (OSError, ValueError) as error:
+                raise ValueError(f"Refusing to modify '{target}' through the link '{current}': {error}") from error
+    return paths[-1]
+
+
+@contextmanager
+def atomicWrite(
+    filename: str,
+    mode: str = 'w',
+    encoding: str | None = None,
+    *,
+    newline: str | None = None,
+    follow_symlinks: bool = False,
+):
+    '''Writes a sibling temporary file and atomically replaces filename after a durable flush'''
+    if follow_symlinks:
+        filename = os.path.realpath(filename)
+    if os.path.islink(filename):
+        raise ValueError(f"Refusing to replace the link '{filename}'")
+    descriptor, temporary = mkstemp(prefix=".tw3mm-", dir=os.path.dirname(os.path.abspath(filename)))
+    try:
+        if 'b' in mode:
+            file = os.fdopen(descriptor, mode)
+        else:
+            file = os.fdopen(descriptor, mode, encoding=encoding, newline=newline)
+        with file:
+            yield file
+            file.flush()
+            os.fsync(file.fileno())
+        if os.path.exists(filename):
+            os.chmod(temporary, stat.S_IMODE(os.stat(filename, follow_symlinks=False).st_mode))
+        os.replace(temporary, filename)
+    except BaseException:
+        if os.path.lexists(temporary):
+            os.remove(temporary)
+        raise
+
+
+def renameInstalledPath(source: str, destination: str, *, modDirectory: bool) -> None:
+    '''Renames an installed path after validating both source and destination'''
+    source = checkInstalledPath(source, modDirectory=modDirectory)
+    destination = checkInstalledPath(destination, modDirectory=modDirectory)
+    os.rename(source, destination)
+
+
+def copyFolder(src: str, dst: str) -> None:
+    '''Replaces dst with a copy of src, keeping the original until the copy is in place'''
+    dst = checkInstalledPath(dst, modDirectory=True)
+    src = os.path.normpath(src)
+    print(f"copying from {src} to {dst} (exists: {os.path.isdir(dst)})")
+    staging = mkdtemp(prefix=".tw3mm-", dir=os.path.dirname(dst))
+    copied = os.path.join(staging, "new")
+    original = os.path.join(staging, "old")
+    try:
+        copytree(src, copied)
+        if os.path.lexists(dst):
+            os.replace(dst, original)
+        try:
+            os.replace(copied, dst)
+        except BaseException:
+            if os.path.lexists(original):
+                os.replace(original, dst)
+            raise
+    except BaseException as error:
+        if os.path.lexists(original):
+            raise RuntimeError(f"Replacing '{dst}' failed, the original files are kept in '{original}'") from error
+        removeDirectory(staging)
+        raise
+    removeDirectory(staging)
+
+
+def removeDirectory(directory: str) -> None:
+    '''Recursively removes a directory strictly inside the game's Mods or DLC directory'''
+    directory = checkInstalledPath(directory, modDirectory=True)
+
+    def getWriteAccess(func: Callable, path: str, exc_info: Any) -> None:
+        if not os.path.islink(path):
+            os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    if os.path.isdir(directory):
+        rmtree(directory, onerror=getWriteAccess)
+
+
+def removeInstalledFile(filename: str) -> None:
+    '''Removes a file strictly inside the game directory'''
+    os.remove(checkInstalledPath(filename, modDirectory=False))
+
+
+def restartProgram():
+    '''Restarts the program'''
+    from src.globals import data
+
+    data.getConfig().write_priority().join()
+    data.getConfig().write_config().join()
+    python = sys.executable
+    os.execl(python, python, *sys.argv)
+
+
+def getFile(parent=None, directory="", extensions="", title=None) -> list[str]:
+    '''Opens custom dialog for selecting multiple folders or files'''
+    from src.globals import data
+    from src.globals.constants import translate
+
+    if title is None:
+        title = translate("MainWindow", "Select Files or Folders")
+    dialog = QFileDialog(parent, title, directory, extensions)
+    dialog_options = QFileDialog.Option.ReadOnly | QFileDialog.Option.HideNameFilterDetails
+    if data.getConfig().get("SETTINGS", "usenativedialog", "1") != "1":
+        dialog_options |= QFileDialog.Option.DontUseNativeDialog
+    dialog.setOptions(dialog_options)
+    dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+    dialog.setModal(True)
+    result = []
+    if dialog.exec():
+        result = dialog.selectedFiles()
+    return [normalizePath(file) for file in result if os.path.isfile(file)]
+
+
+def getSize(start_path='.'):
+    '''Calculates the size of the selected folder'''
+    total_size = 0
+    for dirpath, _, filenames in os.walk(start_path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            total_size += os.path.getsize(fp)
+    return total_size
+
+
+def getIcon(filename):
+    '''Gets icon from the res folder'''
+    icon = QtGui.QIcon()
+    icon.addFile(getProgramRootFolder() + '/res/' + filename)
+    return icon
+
+
+def getKey(item):
+    '''Helper function for the mod list'''
+    return item[1]
+
+
+def isData(name):
+    '''Checks if given name represents correct mod folder or not'''
+    return re.match(r"^(~|)mod.+$", name)
+
+
+def isExecutable(name: str) -> bool:
+    _, ext = os.path.splitext(name)
+    return ext in ('.exe', '.bat')
+
+
+def translateToChosenLanguage() -> bool:
+    from src.globals import data
+
+    language = data.getConfig().language
+    if language and os.path.exists(getProgramRootFolder() + "/translations/" + language):
+        print("loading translation", language)
+        data.translator.load("translations/" + language)
+        if not data.getApp().installTranslator(data.translator):
+            print("loading translation failed", file=sys.stderr)
+            return False
+        return True
+    else:
+        print("chosen language not found:", language, file=sys.stderr)
+        return False
+
+
+def detectEncoding(path: str) -> str:
+    import charset_normalizer
+
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as file:
+                # only sample the start of the file for encoding detection
+                text = file.read(4 * 1024 * 1024)
+                detected = charset_normalizer.detect(text, should_rename_legacy=True)
+                print("detected", path, "as", detected)
+                if detected and "encoding" in detected:
+                    if detected["encoding"] == "ascii":
+                        return "utf-8"
+                    if (
+                        detected["confidence"] is not None
+                        and detected["encoding"] is not None
+                        and float(detected["confidence"]) > 0.5
+                    ):
+                        return str(detected["encoding"].replace("_", "-"))
+        except OSError:
+            pass
+        return "utf-8"
+    else:
+        return "utf-8"
+
+
+def throttle(ms: int):
+    """Decorator ensures function that can only be called once every `ms` milliseconds"""
+    from datetime import datetime, timedelta
+
+    def decorate(f):
+        last_modified = None
+
+        def wrapped(*args, **kwargs):
+            nonlocal last_modified
+            if not last_modified or datetime.now() - last_modified > timedelta(milliseconds=ms):
+                last_modified = datetime.now()
+                return f(*args, **kwargs)
+            return None
+
+        return wrapped
+
+    return decorate
+
+
+def debounce(ms: int) -> Callable[[Callable[..., None]], Callable[..., Timer]]:
+    """Debounce a functions execution by {ms} milliseconds"""
+
+    def decorator(fun: Callable[..., None]) -> Callable[..., Timer]:
+        timer_attr = f"_debounce_timer_{fun.__name__}"
+
+        def debounced(*args: Any, **kwargs: Any) -> Timer:
+            def deferred():
+                fun(*args, **kwargs)
+
+            owner = args[0] if args else debounced
+            try:
+                getattr(owner, timer_attr).cancel()
+            except AttributeError:
+                pass
+            timer = Timer(ms / 1000.0, deferred)
+            setattr(owner, timer_attr, timer)
+            timer.start()
+            return timer
+
+        return debounced
+
+    return decorator
+
+
+def debounceGui(ms: int) -> Callable[[Callable[..., object]], Callable[..., QTimer]]:
+    """Debounce a methods execution by {ms} milliseconds using QTimer"""
+
+    def decorator(fun: Callable[..., object]) -> Callable[..., QTimer]:
+        timer_attr = f"_debounce_qtimer_{fun.__name__}"
+        pending_attr = f"_debounce_pending_{fun.__name__}"
+
+        def debounced(self: Any, *args: Any, **kwargs: Any) -> QTimer:
+            setattr(self, pending_attr, (args, kwargs))
+            timer = getattr(self, timer_attr, None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+
+                def fire():
+                    pending_args, pending_kwargs = getattr(self, pending_attr, ((), {}))
+                    fun(self, *pending_args, **pending_kwargs)
+
+                timer.timeout.connect(fire)
+                setattr(self, timer_attr, timer)
+            timer.start(ms)
+            return timer
+
+        return debounced
+
+    return decorator
