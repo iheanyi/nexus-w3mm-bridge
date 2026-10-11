@@ -126,6 +126,34 @@ def replaced_entries(previous, installed, bindings, mod_id, file, reviewed_key=N
     return result
 
 
+def file_family(file):
+    """Remove only the file's own release label, preserving variant/patch names."""
+    name = str(file.get('name') or '').strip().casefold()
+    version = normalized_version(file.get('version'))
+    if version:
+        name = re.sub(r'(?<![\w.])(?:v(?:ersion)?\s*)?' + re.escape(version) + r'(?![\w.])', ' ', name)
+    return ' '.join(name.split())
+
+
+def normalized_version(value):
+    return re.sub(r'^v(?=\d)', '', str(value or '').strip().casefold())
+
+
+def compare_versions(candidate, installed):
+    """Order dotted numeric releases only; author-specific labels need review."""
+    candidate, installed = normalized_version(candidate), normalized_version(installed)
+    if not candidate or not installed:
+        return None
+    if candidate == installed:
+        return 0
+    if not all(re.fullmatch(r'\d+(?:\.\d+)*', v) for v in (candidate, installed)):
+        return None
+    a, b = [int(p) for p in candidate.split('.')], [int(p) for p in installed.split('.')]
+    width = max(len(a), len(b))
+    a, b = a + [0] * (width - len(a)), b + [0] * (width - len(b))
+    return (a > b) - (a < b)
+
+
 def update_status(entry, binding, files):
     """Return a review suggestion, never an automatic variant substitution."""
     if not binding:
@@ -139,19 +167,30 @@ def update_status(entry, binding, files):
     current = next((f for f in files if f.get('file_id') == binding.get('file_id')), None)
     if not current:
         return 'Installed file unavailable — review', None
-    stamp = int(current.get('uploaded_timestamp') or 0)
+    stamp = int(current.get('uploaded_timestamp') or binding.get('uploaded_timestamp') or 0)
     active = [f for f in files if f.get('category_id') in (1, 2, 3, 5)]
-    newer = [f for f in active if int(f.get('uploaded_timestamp') or 0) > stamp]
-    # An exact file name is a conservative hint, not a guarantee of compatibility.
-    same = [f for f in newer if f.get('name', '').strip().casefold() == current.get('name', '').strip().casefold()
-            and (current.get('category_id') == 4 or f.get('category_id') == current.get('category_id'))]
+    category = current.get('category_id')
+    if category not in (1, 2, 3, 5):
+        category = binding.get('category_id')
+    family = file_family(current)
+    same = [f for f in active if f.get('file_id') != current['file_id']
+            and int(f.get('uploaded_timestamp') or 0) > stamp
+            and family and file_family(f) == family
+            and (category not in (1, 2, 3, 5) or f.get('category_id') == category)
+            and compare_versions(f.get('version'), current.get('version')) != -1
+            and not (expected_digest(current) and expected_digest(f) == expected_digest(current))]
     if len(same) == 1:
-        return f"Newer file: {same[0].get('version', '?')} — review", same[0]['file_id']
-    if newer:
-        return 'New files — choose variant', None
+        relation = compare_versions(same[0].get('version'), current.get('version'))
+        if relation == 0:
+            return 'Re-uploaded file — review', same[0]['file_id']
+        if relation == 1:
+            return f"Newer version: {same[0]['version']} — review", same[0]['file_id']
+        return 'New file for this variant — review', same[0]['file_id']
+    if same:
+        return 'Multiple files for this variant — review', None
     if current.get('category_id') in (4, 6, 7):
         return 'Old / archived file — review', None
-    return 'No newer files', None
+    return 'Up to date', None
 
 
 def game_directory(config_dir):
